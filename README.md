@@ -474,8 +474,8 @@ If no tags are provided, you will be asked to input them from command line:
 
 ```bash
 >>> python train.py tags=[]
-[2022-07-11 15:40:09,358][src.utils.utils][INFO] - Enforcing tags! <cfg.extras.enforce_tags=True>
-[2022-07-11 15:40:09,359][src.utils.rich_utils][WARNING] - No tags provided in config. Prompting user to input tags...
+[2022-07-11 15:40:09,358][bansuri_tts.utils.utils][INFO] - Enforcing tags! <cfg.extras.enforce_tags=True>
+[2022-07-11 15:40:09,359][bansuri_tts.utils.rich_utils][WARNING] - No tags provided in config. Prompting user to input tags...
 Enter a list of comma separated tags (dev):
 ```
 
@@ -514,10 +514,10 @@ Suggestions for improvements are always welcome!
 All PyTorch Lightning modules are dynamically instantiated from module paths specified in config. Example model config:
 
 ```yaml
-_target_: src.models.mnist_model.MNISTLitModule
+_target_: bansuri_tts.models.mnist_model.MNISTLitModule
 lr: 0.001
 net:
-  _target_: src.models.components.simple_dense_net.SimpleDenseNet
+  _target_: bansuri_tts.models.components.simple_dense_net.SimpleDenseNet
   input_size: 784
   lin1_size: 256
   lin2_size: 256
@@ -875,7 +875,7 @@ You can also pass a datamodule config parameter to your model through variable i
 
 ```yaml
 # ./configs/model/my_model.yaml
-_target_: src.models.my_module.MyLitModule
+_target_: bansuri_tts.models.my_module.MyLitModule
 lr: 0.01
 some_param: ${data.some_param}
 ```
