@@ -1,0 +1,29 @@
+_target_: bansuri_tts.models.speechflow.SpeechFlow
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 0.001
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+  _partial_: true
+  mode: min
+  factor: 0.1
+  patience: 10
+
+net:
+  _target_: bansuri_tts.models.components.dit.DiT
+  n_head: 8 
+  d_head: 64 
+  d_embed: 512 
+  n_layers: 6
+  n_mels: 128
+  rope_base: 10000
+  rope_condense_ratio: 1
+  rotary_percentage: 0
+  n_query_groups: None 
+  learn_sigma: False
+
+# compile model for faster training with pytorch 2.0
+compile: false

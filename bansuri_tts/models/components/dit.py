@@ -51,7 +51,7 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 class DiTBlock(nn.Module):
-    def __init__(self, n_head, d_head, d_embed, n_query_groups, hidden_size, bias=False):
+    def __init__(self, n_head, d_head, d_embed, n_query_groups, bias=False):
         super(DiTBlock, self).__init__()
         n_query_groups = n_head if n_query_groups is None else n_query_groups
         self.norm_1 = nn.LayerNorm(d_embed, elementwise_affine=False, eps=1e-6)
@@ -61,7 +61,7 @@ class DiTBlock(nn.Module):
         self.mlp = MLP(d_embed, d_embed, d_embed, approx_gelu)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+            nn.Linear(d_embed, 6 * d_embed, bias=True)
         )
 
     def forward(self, x, condition, cos, sin, mask):
@@ -92,10 +92,11 @@ class FinalLayer(nn.Module):
 class DiT(nn.Module):
     def __init__(
         self, 
-        n_head, 
-        d_head, 
-        d_embed, 
-        n_layers, 
+        n_head=8, 
+        d_head=64, 
+        d_embed=512, 
+        n_layers=6,
+        n_mels=128,
         rope_base=10000,
         rope_condense_ratio=1,
         rotary_percentage=1.0,
@@ -113,6 +114,8 @@ class DiT(nn.Module):
         self.rope_cache = None
         self.max_seq_length = None
         self.t_embedder = TimestepEmbedder(d_embed)
+
+        self.size_adapter = nn.Linear(n_mels, d_embed)
 
         self.blocks = nn.ModuleList([
             DiTBlock(n_head, d_head, d_embed, n_query_groups) for _ in range(n_layers)
