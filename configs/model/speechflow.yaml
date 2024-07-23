@@ -21,8 +21,8 @@ net:
   n_mels: 128
   rope_base: 10000
   rope_condense_ratio: 1
-  rotary_percentage: 0
-  n_query_groups: None 
+  rotary_percentage: 1.0
+  n_query_groups: 8 
   learn_sigma: False
 
 # compile model for faster training with pytorch 2.0

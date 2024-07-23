@@ -3,8 +3,8 @@ train_manifest: ${paths.train_manifest}
 val_manifest: ${paths.val_manifest}
 test_manifest: ${paths.val_manifest}
 sample_rate: 24_000
-min_duration: 0.58
-max_duration: 5.0
+min_duration: 1.4
+max_duration: 20.0
 slice_audio: True
 batch_size: 64
 num_workers: 8

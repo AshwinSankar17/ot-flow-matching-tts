@@ -3,6 +3,7 @@ from typing import Any, Dict, Tuple, Optional
 import torch
 import numpy as np
 from lightning import LightningModule
+from lightning.pytorch.utilities import grad_norm
 from torchmetrics import MinMetric, MeanMetric
 
 from torchcfm.conditional_flow_matching import ExactOptimalTransportConditionalFlowMatcher
@@ -185,11 +186,8 @@ class SpeechFlow(LightningModule):
         # loss function
         self.criterion = torch.nn.MSELoss()
 
-        self.train_loss = MeanMetric()
-        self.val_loss = MeanMetric()
-        self.test_loss = MeanMetric()
-
-        self.val_loss_best = MinMetric()
+        self.val_loss = []
+        self.test_loss = []
     
     def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Perform a forward pass through the model `self.net`.
@@ -203,8 +201,15 @@ class SpeechFlow(LightningModule):
         """Lightning hook that is called when training begins."""
         # by default lightning executes validation step sanity checks before training starts,
         # so it's worth to make sure validation metrics don't store results from these checks
-        self.val_loss.reset()
-        self.val_loss_best.reset()
+        # self.val_loss.reset()
+        # self.val_loss_best.reset()
+        pass
+    
+    def on_before_optimizer_step(self, optimizer):
+        # Compute the 2-norm for each layer
+        # If using mixed precision, the gradients are already unscaled here
+        norms = grad_norm(self.net, norm_type=2)
+        self.log_dict(norms)
 
     def model_step(
         self, batch: Dict[str, torch.Tensor]
@@ -219,16 +224,17 @@ class SpeechFlow(LightningModule):
             - A tensor of target labels.
         """
         # prep data
-        x1, seq_lens = batch["mel_spec"], batch["mel_spec_lens"]
+        x1, seq_lens = batch["mel_spec"], batch["mel_spec_len"]
         y = x1.clone()
         # generate length mask and random content mask
-        len_mask = mask_from_lens(seq_lens, device=x1.device)
-        x_mask = compute_mask_indices((x1.size(0), x1.size(2)), len_mask, 0.85, 128).to(x1.device)
+        len_mask = mask_from_lens(seq_lens, device=x1.device).unsqueeze(1)
+        x_mask = compute_mask_indices((x1.size(0), x1.size(2)), None, 0.85, 128, min_masks=2).to(x1.device).unsqueeze(1)
+        # print(x1.size(), x_mask.size())
         x1 = x1 * x_mask
         # model step
         x0 = torch.randn_like(x1)
         t, xt, ut, _, y1 = self.FM.guided_sample_location_and_conditional_flow(x0, x1, y1=y)
-        logits = self.forward(xt, t, y, len_mask)
+        logits = self.forward(xt.transpose(1, 2), t, y.transpose(1, 2), len_mask).transpose(1, 2)
         # neg mask to compute loss for MLM
         neg_x_mask = (~x_mask) * len_mask
         logits = logits * neg_x_mask
@@ -248,9 +254,9 @@ class SpeechFlow(LightningModule):
         loss, preds, targets = self.model_step(batch)
 
         # update and log metrics
-        self.train_loss(loss)
+        # self.train_loss(loss)
         # self.train_acc(preds, targets)
-        self.log("train/loss", self.train_loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train/loss", loss, prog_bar=True)
         # self.log("train/acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
 
         return loss
@@ -263,12 +269,18 @@ class SpeechFlow(LightningModule):
         :param batch_idx: The index of the current batch.
         """
         loss, preds, targets = self.model_step(batch)
-
+        self.val_loss.append(loss)
         # update and log metrics
-        self.val_loss(loss)
+        # self.val_loss(loss)
         # self.val_acc(preds, targets)
-        self.log("val/loss", self.val_loss, on_step=False, on_epoch=True, prog_bar=True)
+        # self.log("val/loss", self.val_loss, on_step=False, on_epoch=True, prog_bar=True)
         # self.log("val/acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
+    
+    def on_validation_epoch_end(self) -> None:
+        "Lightning hook that is called when a validation epoch ends."
+        val_loss = sum(self.val_loss) / len(self.val_loss)
+        self.val_loss.clear()
+        self.log("val/loss", val_loss, prog_bar=True)
 
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> None:
         """Perform a single test step on a batch of data from the test set.
@@ -280,10 +292,15 @@ class SpeechFlow(LightningModule):
         loss, preds, targets = self.model_step(batch)
 
         # update and log metrics
-        self.test_loss(loss)
+        self.test_loss.append(loss)
         # self.test_acc(preds, targets)
-        self.log("test/loss", self.test_loss, on_step=False, on_epoch=True, prog_bar=True)
+        # self.log("test/loss", self.test_loss, prog_bar=True)
         # self.log("test/acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
+    
+    def on_test_epoch_end(self) -> None:
+        test_loss = sum(self.test_loss) / len(self.test_loss)
+        self.test_loss.clear()
+        self.log("test/loss", test_loss, prog_bar=True)
     
     def setup(self, stage: str) -> None:
         """Lightning hook that is called at the beginning of fit (train + validate), validate,

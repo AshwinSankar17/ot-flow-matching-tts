@@ -33,12 +33,13 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
     return roped.to(dtype=x.dtype)
 
 class SelfAttention(nn.Module):
-    def __init__(self, n_head, d_head, n_query_groups, d_embed, bias=False):
+    def __init__(self, n_head, d_head, n_query_groups, d_embed, rope_n_elem, bias=False):
         super(SelfAttention, self).__init__()
         self.n_head = n_head
         self.d_head = d_head
         self.n_query_groups = n_query_groups
         self.d_embed = d_embed
+        self.rope_n_elem = rope_n_elem
 
         shape = (n_head + 2 * n_query_groups) * d_head
         self.qkv_proj = nn.Linear(d_embed, shape, bias=bias)
@@ -52,7 +53,9 @@ class SelfAttention(nn.Module):
             # input_pos
         ) -> torch.Tensor:
         B, T, C = x.size()
-
+        mask = mask
+        # mask = mask.repeat(1, 1, C)
+        # print(mask.shape)
         qkv = self.qkv_proj(x)
 
         # adaptive logic for MQA, GQA. Falls back to MQA.
@@ -63,30 +66,34 @@ class SelfAttention(nn.Module):
 
         q, k, v = qkv.split((q_per_kv, 1, 1), dim=2)
 
-        if self.config.n_query_groups != self.config.n_head and self.config.n_query_groups != 1:
-            k = k.expand(B, self.config.n_query_groups, q_per_kv, T, self.config.head_size)
-            v = v.expand(B, self.config.n_query_groups, q_per_kv, T, self.config.head_size)
+        if self.n_query_groups != self.n_head and self.n_query_groups != 1:
+            k = k.expand(B, self.n_query_groups, q_per_kv, T, self.d_head)
+            v = v.expand(B, self.n_query_groups, q_per_kv, T, self.d_head)
 
-        q = q.reshape(B, -1, T, self.config.head_size)  # (B, nh_q, T, hs)
-        k = k.reshape(B, -1, T, self.config.head_size)  # (B, nh_k, T, hs)
-        v = v.reshape(B, -1, T, self.config.head_size)  # (B, nh_v, T, hs)
+        q = q.reshape(B, -1, T, self.d_head)  # (B, nh_q, T, hs)
+        k = k.reshape(B, -1, T, self.d_head)  # (B, nh_k, T, hs)
+        v = v.reshape(B, -1, T, self.d_head)  # (B, nh_v, T, hs)
+        # q = apply_rope(q, cos, sin)
+        # k = apply_rope(k, cos, sin)
+        q_roped = apply_rope(q[..., : self.rope_n_elem], cos, sin)
+        k_roped = apply_rope(k[..., : self.rope_n_elem], cos, sin)
+        q = torch.cat((q_roped, q[..., self.rope_n_elem :]), dim=-1)
+        k = torch.cat((k_roped, k[..., self.rope_n_elem :]), dim=-1)
 
-        q_roped = apply_rope(q[..., : self.config.rope_n_elem], cos, sin)
-        k_roped = apply_rope(k[..., : self.config.rope_n_elem], cos, sin)
-        q = torch.cat((q_roped, q[..., self.config.rope_n_elem :]), dim=-1)
-        k = torch.cat((k_roped, k[..., self.config.rope_n_elem :]), dim=-1)
+        # mask = mask.reshape(q.shape)
+        # print(mask.shape)
 
-        y = self.scaled_dot_product_attention(q, k, v, mask)
+        y = self.scaled_dot_product_attention(q, k, v, None)
 
-        y = y.reshape(B, T, self.config.head_size * self.config.n_head)  # re-assemble all head outputs side by side
-
+        y = y.reshape(B, T, self.d_head * self.n_head)  # re-assemble all head outputs side by side
         # output projection
         return self.out_proj(y)
 
     def scaled_dot_product_attention(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        scale = 1.0 / math.sqrt(self.config.head_size)
+        # print(q.shape, k.shape, v.shape)
+        scale = 1.0 / math.sqrt(self.d_head)
         y = torch.nn.functional.scaled_dot_product_attention(
             q, k, v, attn_mask=mask, dropout_p=0.0, scale=scale
         )

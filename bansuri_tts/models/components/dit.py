@@ -9,7 +9,7 @@ from bansuri_tts.models.components.attention import SelfAttention, build_rope_ca
 from bansuri_tts.models.components.mlp import MLP
 
 def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    return x * (1 + scale) + shift
 
 class TimestepEmbedder(nn.Module):
     """
@@ -51,11 +51,11 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 class DiTBlock(nn.Module):
-    def __init__(self, n_head, d_head, d_embed, n_query_groups, bias=False):
+    def __init__(self, n_head, d_head, d_embed, n_query_groups, rope_n_elem, bias=False):
         super(DiTBlock, self).__init__()
         n_query_groups = n_head if n_query_groups is None else n_query_groups
         self.norm_1 = nn.LayerNorm(d_embed, elementwise_affine=False, eps=1e-6)
-        self.attn = SelfAttention(n_head, d_head, n_query_groups, d_embed, bias=bias)
+        self.attn = SelfAttention(n_head, d_head, n_query_groups, d_embed, rope_n_elem, bias=bias)
         self.norm_2 = nn.LayerNorm(d_embed, elementwise_affine=False, eps=1e-6)
         approx_gelu = partial(nn.GELU, approximate="tanh")
         self.mlp = MLP(d_embed, d_embed, d_embed, approx_gelu)
@@ -65,9 +65,9 @@ class DiTBlock(nn.Module):
         )
 
     def forward(self, x, condition, cos, sin, mask):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(condition).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), cos, sin, mask)
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp), mask)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(condition).chunk(6, dim=-1)
+        x = x + gate_msa * self.attn(modulate(self.norm_1(x), shift_msa, scale_msa), cos, sin, mask)
+        x = x + gate_mlp * self.mlp(modulate(self.norm_2(x), shift_mlp, scale_mlp), mask)
         return x
 
 class FinalLayer(nn.Module):
@@ -77,17 +77,17 @@ class FinalLayer(nn.Module):
     def __init__(self, hidden_size, out_channels):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Conv1d(hidden_size, out_channels, bias=True)
+        self.linear = nn.Conv1d(hidden_size, out_channels, kernel_size=1, bias=True)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
             nn.Linear(hidden_size, 2 * hidden_size, bias=True)
         )
 
     def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
         x = modulate(self.norm_final(x), shift, scale)
-        x = self.linear(x)
-        return x
+        x = self.linear(x.transpose(1,2))
+        return x.transpose(1,2)
 
 class DiT(nn.Module):
     def __init__(
@@ -103,25 +103,27 @@ class DiT(nn.Module):
         n_query_groups=None, 
         learn_sigma=False,
     ):
+        super().__init__()
         self.learn_sigma = learn_sigma
         self.in_channels = d_embed
-        self.out_channels = d_embed * 2 if self.learn_sigma else d_embed
+        self.out_channels = n_mels * 2 if self.learn_sigma else n_mels
         self.rope_base = rope_base
         self.rotary_percentage = rotary_percentage
         self.rope_condense_ratio = rope_condense_ratio
-        self.rope_n_elem = int(self.rotary_percentage * n_head)
+        self.rope_n_elem = int(self.rotary_percentage * d_head)
 
         self.rope_cache = None
-        self.max_seq_length = None
+        self.max_seq_length = 4096
         self.t_embedder = TimestepEmbedder(d_embed)
 
-        self.size_adapter = nn.Linear(n_mels, d_embed)
+        self.noise_adapter = nn.Linear(n_mels, d_embed)
+        self.condn_adapter = nn.Linear(n_mels, d_embed)
 
         self.blocks = nn.ModuleList([
-            DiTBlock(n_head, d_head, d_embed, n_query_groups) for _ in range(n_layers)
+            DiTBlock(n_head, d_head, d_embed, n_query_groups, self.rope_n_elem) for _ in range(n_layers)
         ])
         self.post = FinalLayer(d_embed, self.out_channels)
-        self.initialize_weights()
+        # self.initialize_weights()
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -140,14 +142,14 @@ class DiT(nn.Module):
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
         # Zero-out output layers:
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
+        nn.init.constant_(self.post.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.post.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.post.linear.weight, 0)
+        nn.init.constant_(self.post.linear.bias, 0)
 
     def build_rope_cache(self, device: Optional[torch.device]=None) -> torch.Tensor:
         self.rope_cache = build_rope_cache(
-            seq_length=self.max_seq_length,
+            seq_len=self.max_seq_length,
             n_elem=self.rope_n_elem,
             device=device,
             condense_ratio=self.rope_condense_ratio,
@@ -155,15 +157,24 @@ class DiT(nn.Module):
         )
     
     def forward(self, x, t, y, mask):
-        t = self.t_embedder(t)
-        c = t + y                                # (N, T, D)
-        if self.max_seq_length < x.size(1):
-            self.max_seq_length = x.size(1)
+        y = self.condn_adapter(y)
+        x = self.noise_adapter(x)
+        t = self.t_embedder(t).unsqueeze(1)
+        c = t + y                              # (N, T, D)
+        T = x.size(1)
+        if self.max_seq_length < T:
+            self.max_seq_length = T
             self.build_rope_cache(x.device)
+        if self.rope_cache is None:
+            self.build_rope_cache(x.device)
+        
         cos, sin = self.rope_cache
+        cos = cos[:T]
+        sin = sin[:T]
+
         for block in self.blocks:
             x = block(x, c, cos, sin, mask)      # (N, T, D)
-        x = self.final_layer(x, c)
+        x = self.post(x, c)
         return x
     
     def forward_with_cfg(self, x, t, y, cfg_scale):
