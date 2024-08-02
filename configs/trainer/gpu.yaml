@@ -1,10 +1,13 @@
 defaults:
   - default
 
-accelerator: gpu
-devices: 1
-gradient_clip_val: 1000
+accelerator: cuda
+devices: -1
+gradient_clip_val: 0.2
 gradient_clip_algorithm: norm
-precision: bf16-mixed
-detect_anomaly: true
+precision: 'bf16-mixed'
+# detect_anomaly: true
+check_val_every_n_epoch: 5
+log_every_n_steps: 10
 # overfit_batches: 3
+benchmark: true

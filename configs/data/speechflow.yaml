@@ -4,8 +4,12 @@ val_manifest: ${paths.val_manifest}
 test_manifest: ${paths.val_manifest}
 sample_rate: 24_000
 min_duration: 1.4
-max_duration: 20.0
+max_duration: 7.5
 slice_audio: True
-batch_size: 64
-num_workers: 8
+batch_size: 320
+num_workers: 16
 pin_memory: True
+n_mels: ${model.net.n_mels}
+sup_data_types:
+  - "mel_spec"
+sup_data_path: ${paths.sup_data_path}

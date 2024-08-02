@@ -21,10 +21,14 @@ class MLP(nn.Module):
         self.fc2 = nn.Conv1d(hidden_features, out_features, kernel_size=1, bias=bias)
         self.drop = nn.Dropout(dropout)
 
-    def forward(self, x, x_mask):
+    def forward(self, x, x_mask = None):
         x = self.fc1(x.transpose(1,2))
         x = self.act(x)
         x = self.drop(x)
-        x = self.fc2(x * x_mask) * x_mask
-        x = self.drop(x) 
+        if x_mask is not None:
+            x = x * x_mask
+        x = self.fc2(x)
+        x = self.drop(x)
+        if x_mask is not None:
+            x = x * x_mask 
         return x.transpose(1,2)

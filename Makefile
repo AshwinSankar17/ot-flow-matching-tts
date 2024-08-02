@@ -28,3 +28,16 @@ test-full: ## Run all tests
 
 train: ## Train the model
 	python bansuri_tts/train.py
+
+pre-install: ## Setup dependencies and other repos
+	conda create -n bansuri python=3.11
+	conda activate bansuri
+	git clone https://github.com/iamunr4v31/astravani.git
+	cd astravani
+	pip install -r requirements.txt
+	pip install -e .
+	cd ..
+
+install: ## Install
+	pip install -r requirements.txt
+	pip install -e .

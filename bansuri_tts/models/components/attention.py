@@ -3,6 +3,7 @@ from typing import Optional, Tuple
 import math
 import torch
 from torch import nn
+from torch.nn.attention import sdpa_kernel, SDPBackend
 
 def build_rope_cache(
     seq_len: int, n_elem: int, device: Optional[torch.device] = None, base: int = 10000, condense_ratio: int = 1
@@ -94,7 +95,8 @@ class SelfAttention(nn.Module):
     ) -> torch.Tensor:
         # print(q.shape, k.shape, v.shape)
         scale = 1.0 / math.sqrt(self.d_head)
-        y = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=mask, dropout_p=0.0, scale=scale
-        )
+        with sdpa_kernel(SDPBackend.MATH):
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask, dropout_p=0.0, scale=scale
+            )
         return y.transpose(1, 2)

@@ -1,12 +1,37 @@
 from typing import Any, Dict, Tuple, Optional
 
 import torch
+import random
+import librosa
 import numpy as np
 from lightning import LightningModule
 from lightning.pytorch.utilities import grad_norm
+from lightning.pytorch import loggers as ptl_loggers
 from torchmetrics import MinMetric, MeanMetric
 
-from torchcfm.conditional_flow_matching import ExactOptimalTransportConditionalFlowMatcher
+import torchdiffeq
+import matplotlib.pyplot as plt
+
+
+def plot_spectrogram_to_numpy(spectrogram):
+    spectrogram = spectrogram.astype(np.float32)
+    fig, ax = plt.subplots(figsize=(12, 3))
+    im = ax.imshow(librosa.power_to_db(spectrogram), aspect="auto", origin="lower", interpolation="nearest")
+    plt.colorbar(im, ax=ax)
+    plt.xlabel("Frames")
+    plt.ylabel("Channels")
+    plt.tight_layout()
+
+    fig.canvas.draw()
+    data = save_figure_to_numpy(fig)
+    plt.close()
+    return data
+
+def save_figure_to_numpy(fig):
+    # save it to a numpy array.
+    data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")
+    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    return data
 
 
 def compute_mask_indices(
@@ -135,6 +160,40 @@ def compute_mask_indices(
 
     return torch.from_numpy(mask)
 
+def random_interval_masking(batch_size, length, *, min_size, min_count, max_count, device):
+    tensor = torch.full((batch_size, length), False, device=device, dtype=torch.bool)
+    for i in range(batch_size):
+
+        # Expected sum of all intervals
+        expected_length = random.randint(min_count, max_count)
+
+        # Number of intervals
+        num_intervals = random.randint(1, expected_length // min_size)
+
+        # Generate interval lengths
+        lengths = [min_size] * num_intervals
+        for _ in range(expected_length - num_intervals * min_size):
+            lengths[random.randint(0, num_intervals - 1)] += 1
+
+        # Generate start points
+        placements = []
+        offset = 0
+        remaining = expected_length
+        for l in lengths:
+            start_position = random.uniform(offset, remaining - l)
+            placements.append(start_position)
+            offset = start_position + l
+            remaining -= l
+
+        # Write to tensor
+        for l, p in zip(lengths, placements):
+            tensor[i, int(p):int(p + l)] = True
+
+    return tensor
+
+def generate_conditional_mask(bsz, p_keep, device="cpu"):
+    return torch.rand(bsz, device=device) < p_keep
+
 def mask_from_lens(seq_lengths, device=None):
     """
     Generates a mask tensor based on provided sequence lengths.
@@ -180,22 +239,36 @@ class SpeechFlow(LightningModule):
         self.save_hyperparameters(logger=False)
 
         self.net = net
+        self.sigma_min = 1e-5
         # optimizer = torch.optim.Adam(model.parameters())
-        self.FM = ExactOptimalTransportConditionalFlowMatcher(sigma=0.0)
+        # self.FM = ExactOptimalTransportConditionalFlowMatcher(sigma=0.0)
+        # self.FM = ConditionalFlowMatcher(sigma=0.0)
 
         # loss function
-        self.criterion = torch.nn.MSELoss()
+        # self.criterion = torch.nn.HuberLoss(reduction="none")
+        self.criterion = torch.nn.MSELoss(reduction="none")
 
         self.val_loss = []
         self.test_loss = []
     
-    def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    @torch.no_grad()
+    def forward(self, y: torch.Tensor, n_timesteps: int = 100, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Perform a forward pass through the model `self.net`.
 
         :param x: A tensor of images.
         :return: A tensor of logits.
         """
-        return self.net(x, t, y, mask)
+        y = y.transpose(1, 2)
+        traj = torchdiffeq.odeint(
+            lambda t, x: self.net.forward(x, t.unsqueeze(0), y, mask),
+            # torch.randn((1, 841, 128)),
+            torch.randn_like(y),
+            torch.linspace(0, 1, n_timesteps, device=y.device),
+            atol=1e-4,
+            rtol=1e-4,
+            method="euler",
+        )
+        return traj
     
     def on_train_start(self) -> None:
         """Lightning hook that is called when training begins."""
@@ -226,22 +299,43 @@ class SpeechFlow(LightningModule):
         # prep data
         x1, seq_lens = batch["mel_spec"], batch["mel_spec_len"]
         y = x1.clone()
-        # generate length mask and random content mask
+
+        # generate length mask and random content mask and conditional mask
         len_mask = mask_from_lens(seq_lens, device=x1.device).unsqueeze(1)
-        x_mask = compute_mask_indices((x1.size(0), x1.size(2)), None, 0.85, 128, min_masks=2).to(x1.device).unsqueeze(1)
-        # print(x1.size(), x_mask.size())
-        x1 = x1 * x_mask
-        # model step
+        x_mask = random_interval_masking(x1.size(0), x1.size(2), min_size=10, min_count=int(0.7 * x1.size(2)), max_count=x1.size(2), device=x1.device).unsqueeze(1)
+        conditional_mask = generate_conditional_mask(x1.size(0), 0.8, x1.device).unsqueeze(1).unsqueeze(2)
+
+        joint_mask = x_mask * conditional_mask
+
+        y = y * joint_mask
+        
+        # Sample noise
         x0 = torch.randn_like(x1)
-        t, xt, ut, _, y1 = self.FM.guided_sample_location_and_conditional_flow(x0, x1, y1=y)
-        logits = self.forward(xt.transpose(1, 2), t, y.transpose(1, 2), len_mask).transpose(1, 2)
+        # Sample timestep
+        t = torch.rand([x1.size(0), 1, 1]).to(x1)
+        # Compute Flow
+        ut = x1 - (1 - self.sigma_min) * x0
+        # Sample location w.r.t t
+        xt = (1 - (1 - self.sigma_min) * t) * x0 + x1 * t
+
+        # Predict flow
+        vt = self.net(xt.transpose(1, 2), t.squeeze(), y.transpose(1, 2), len_mask).transpose(1, 2)
+        
         # neg mask to compute loss for MLM
-        neg_x_mask = (~x_mask) * len_mask
-        logits = logits * neg_x_mask
-        y = y * neg_x_mask
-        # loss computation
-        loss = self.criterion(logits, y)
-        return loss, logits, y
+        neg_joint_mask = (~joint_mask) * len_mask
+        # vt_masked = vt * neg_joint_mask
+        # ut_masked = ut * neg_joint_mask
+        neg_joint_mask = neg_joint_mask.repeat(1, x1.size(1), 1)
+        loss = self.criterion(vt, ut)
+        loss = loss[neg_joint_mask].mean()
+        # loss = self.criterion(vt, ut).mean(dim=1)
+        
+        # loss = loss * neg_joint_mask
+        # n_masked = neg_joint_mask.sum(dim=-1).clamp(min=1).squeeze(1)
+        # loss = loss.sum(dim=-1) / n_masked
+        # loss = loss.mean()
+
+        return loss, vt, y
     
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.tensor:
         """Perform a single training step on a batch of data from the training set.
@@ -259,6 +353,33 @@ class SpeechFlow(LightningModule):
         self.log("train/loss", loss, prog_bar=True)
         # self.log("train/acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
 
+        # if batch_idx == 0:
+        #     with torch.no_grad():
+        #         x1 = batch["mel_spec"]
+        #         len_mask = mask_from_lens(batch["mel_spec_len"], device=x1.device).unsqueeze(1)
+        #         x_mask = compute_mask_indices((x1.size(0), x1.size(2)), None, 0.85, 128, min_masks=2).to(x1.device).unsqueeze(1)
+        #         x1 = x1 * x_mask
+        #         traj = self.forward(x1, 100, len_mask)
+
+        #         y = traj[-1].transpose(1, 2)
+        #         y = y * len_mask
+        #         idx = torch.argmax(batch["mel_spec_len"])
+        #         gt_image = batch["mel_spec"][idx]
+        #         masked_image = x1[idx]
+        #         gen_image = y[idx]
+        #         self.log_wandb_image(
+        #             key="train/gt_mel",
+        #             images=[gt_image]
+        #         )
+        #         self.log_wandb_image(
+        #             key="train/masked_mel",
+        #             images=[masked_image]
+        #         )
+        #         self.log_wandb_image(
+        #             key="train/gen_mel",
+        #             images=[gen_image]
+        #         )
+
         return loss
     
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> None:
@@ -268,7 +389,49 @@ class SpeechFlow(LightningModule):
             labels.
         :param batch_idx: The index of the current batch.
         """
-        loss, preds, targets = self.model_step(batch)
+        x1 = batch["mel_spec"]
+        len_mask = mask_from_lens(batch["mel_spec_len"], device=x1.device).unsqueeze(1)
+
+        x_mask = random_interval_masking(x1.size(0), x1.size(2), min_size=10, min_count=int(0.7 * x1.size(2)), max_count=x1.size(2), device=x1.device).unsqueeze(1)
+        conditional_mask = generate_conditional_mask(x1.size(0), 0.8, x1.device).unsqueeze(1).unsqueeze(2)
+        joint_mask = x_mask * conditional_mask
+
+        y = x1 * joint_mask
+        traj = self.forward(y, 100, len_mask)
+
+        y_pred = traj[-1].transpose(1, 2)
+        neg_joint_mask = (~joint_mask) * len_mask
+        neg_joint_mask = neg_joint_mask.repeat(1, x1.size(1), 1)
+        # y_pred = y_pred * neg_joint_mask
+        # x_true = x1 * neg_joint_mask
+
+        # loss = self.criterion(x_true, y_pred) / (torch.sum(neg_joint_mask))
+        loss = self.criterion(x1, y_pred)
+        loss = loss[neg_joint_mask].mean()
+        # loss = self.criterion(x1, y_pred).mean(dim=1)
+
+        # loss = loss * neg_joint_mask
+        # n_masked = neg_joint_mask.sum(dim=-1).clamp(min=1).squeeze(1)
+        # loss = loss.sum(dim=-1) / n_masked
+        # loss = loss.mean()
+
+        idx = torch.argmax(batch["mel_spec_len"])
+        if batch_idx == 0:
+            gt_image = batch["mel_spec"][idx]
+            masked_image = y[idx]
+            gen_image = y_pred[idx]
+            self.log_wandb_image(
+                key="val/gt_mel",
+                images=[gt_image]
+            )
+            self.log_wandb_image(
+                key="val/masked_mel",
+                images=[masked_image]
+            )
+            self.log_wandb_image(
+                key="val/gen_mel",
+                images=[gen_image]
+            )
         self.val_loss.append(loss)
         # update and log metrics
         # self.val_loss(loss)
@@ -280,7 +443,7 @@ class SpeechFlow(LightningModule):
         "Lightning hook that is called when a validation epoch ends."
         val_loss = sum(self.val_loss) / len(self.val_loss)
         self.val_loss.clear()
-        self.log("val/loss", val_loss, prog_bar=True)
+        self.log("val/loss", val_loss, sync_dist=True, prog_bar=True)
 
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> None:
         """Perform a single test step on a batch of data from the test set.
@@ -289,9 +452,48 @@ class SpeechFlow(LightningModule):
             labels.
         :param batch_idx: The index of the current batch.
         """
-        loss, preds, targets = self.model_step(batch)
+        x1 = batch["mel_spec"]
+        len_mask = mask_from_lens(batch["mel_spec_len"], device=x1.device).unsqueeze(1)
 
-        # update and log metrics
+        x_mask = random_interval_masking(x1.size(0), x1.size(2), min_size=10, min_count=int(0.7 * x1.size(2)), max_count=x1.size(2), device=x1.device).unsqueeze(1)
+        conditional_mask = generate_conditional_mask(x1.size(0), 0.8, x1.device).unsqueeze(1).unsqueeze(2)
+        joint_mask = x_mask * conditional_mask
+
+        y = x1 * joint_mask
+        traj = self.forward(y, 100, len_mask)
+
+        y_pred = traj[-1].transpose(1, 2)
+        neg_joint_mask = (~joint_mask) * len_mask
+
+        # x_true = x1 * neg_joint_mask
+        # y_pred = y_pred * neg_joint_mask
+        neg_joint_mask = neg_joint_mask.repeat(1, x1.size(1), 1)
+        loss = self.criterion(x1, y_pred)
+        loss = loss[neg_joint_mask].mean()
+        # loss = self.criterion(x1, y_pred).mean(dim=1)
+
+        # loss = loss * neg_joint_mask
+        # n_masked = neg_joint_mask.sum(dim=-1).clamp(min=1).squeeze(1)
+        # loss = loss.sum(dim=-1) / n_masked
+        # loss = loss.mean()
+        # loss = self.criterion(x_true, y_pred) / (torch.sum(neg_joint_mask))
+        idx = torch.argmax(batch["mel_spec_len"])
+        if batch_idx == 0:
+            gt_image = batch["mel_spec"][idx]
+            masked_image = y[idx]
+            gen_image = y_pred[idx]
+            self.log_wandb_image(
+                key="val/gt_mel",
+                images=[gt_image]
+            )
+            self.log_wandb_image(
+                key="val/masked_mel",
+                images=[masked_image]
+            )
+            self.log_wandb_image(
+                key="val/gen_mel",
+                images=[gen_image]
+            )
         self.test_loss.append(loss)
         # self.test_acc(preds, targets)
         # self.log("test/loss", self.test_loss, prog_bar=True)
@@ -324,6 +526,7 @@ class SpeechFlow(LightningModule):
         :return: A dict containing the configured optimizers and learning-rate schedulers to be used for training.
         """
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
+        # stepping_batches = self.trainer.estimated_stepping_batches
         if self.hparams.scheduler is not None:
             scheduler = self.hparams.scheduler(optimizer=optimizer)
             return {
@@ -336,3 +539,13 @@ class SpeechFlow(LightningModule):
                 },
             }
         return {"optimizer": optimizer}
+    
+    def log_wandb_image(self, images, key):
+        wandb_logger = None
+        for logger in self.trainer.loggers:
+            if isinstance(logger, ptl_loggers.WandbLogger):
+                wandb_logger = logger
+
+        if wandb_logger is not None:
+            images = [plot_spectrogram_to_numpy(image.detach().cpu().float().numpy()) for image in images]
+            wandb_logger.log_image(key=key, images=images)

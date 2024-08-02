@@ -3,27 +3,39 @@ _target_: bansuri_tts.models.speechflow.SpeechFlow
 optimizer:
   _target_: torch.optim.AdamW
   _partial_: true
-  lr: 0.001
+  lr: 1e-5
+  weight_decay: 1e-6
+
+# optimizer:
+#   _target_: schedulefree.AdamWScheduleFree
+#   _partial_: true
+#   lr: 5e-5
+#   weight_decay: 1e-6
+#   warmup_steps: 1000
+
+# scheduler: null
 
 scheduler:
-  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+  _target_: torch.optim.lr_scheduler.OneCycleLR
   _partial_: true
-  mode: min
-  factor: 0.1
-  patience: 10
+  epochs: ${trainer.max_epochs}
+  steps_per_epoch: 2759
+  max_lr: 1e-4
+  last_epoch: -1
 
 net:
-  _target_: bansuri_tts.models.components.dit.DiT
-  n_head: 8 
+  _target_: bansuri_tts.models.components.dit.PixartDiT
+  n_head: 16 
   d_head: 64 
-  d_embed: 512 
-  n_layers: 6
-  n_mels: 128
+  d_embed: 1024 
+  n_layers: 12
+  n_mels: 100
   rope_base: 10000
+  ff_dim: 4096
   rope_condense_ratio: 1
   rotary_percentage: 1.0
-  n_query_groups: 8 
-  learn_sigma: False
+  n_query_groups: 16
+  learn_sigma: false
 
 # compile model for faster training with pytorch 2.0
-compile: false
+compile: true

@@ -6,15 +6,38 @@ root_dir: "."
 
 # path to data directory
 # data_dir: ${paths.root_dir}/data/
-train_manifest: "path/to/train_manifest.json"
-val_manifest: "path/to/val_manifest.json"
+train_manifest:
+  - "/home/tts/ttsteam/repos/vits/manifests/rasa/train_ben_raw.json"
+  - "/home/tts/ttsteam/datasets/ivr_v1/train_manifest.json"
+  - "/home/tts/ttsteam/datasets/LJSpeech-1.1/metadata_train.json"
+  - "/home/tts/ttsteam/datasets/limmits/Telugu_F.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/Marathi_F.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/Hindi_M.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/English_M.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/Chhattisgarhi_M.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/Marathi_M.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/Chhattisgarhi_F.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/Bengali_F.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/Hindi_F.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/Kannada_F.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/Bengali_M.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/Kannada_M.jsonl" 
+  - "/home/tts/ttsteam/datasets/limmits/English_F.jsonl"
+# train_manifest: "/home/tts/ttsteam/repos/vits/manifests/rasa/test_ben_raw.json"
+val_manifest: 
+  - "/home/tts/ttsteam/repos/vits/manifests/rasa/test_ben_raw.json"
+  - "/home/tts/ttsteam/datasets/ivr_v1/test_manifest.json"
+  - "/home/tts/ttsteam/datasets/LJSpeech-1.1/metadata_test.json"
+# train_manifest: "/home/tts/ttsteam/datasets/ivr_v1/train_manifest.json"
+# val_manifest: "/home/tts/ttsteam/datasets/ivr_v1/test_manifest.json"
+sup_data_path: "/home/tts/ttsteam/repos/bansuri-tts/logs"
 
 # path to logging directory
-log_dir: ${paths.root_dir}/logs/
+log_dir: ${paths.root_dir}/logs/ivr/
 
 # path to output directory, created dynamically by hydra
 # path generation pattern is specified in `configs/hydra/default.yaml`
-# use it to store all files generated during the run, like ckpts and metrics
+# use it to store all files generated during the run. like ckpts and metrics
 output_dir: ${hydra:runtime.output_dir}
 
 # path to working directory

@@ -73,6 +73,9 @@ class SpeechFlowDataModule(LightningDataModule):
         batch_size: int = 64,
         num_workers: int = 8,
         pin_memory: bool = True,
+        n_mels: int = 100,
+        sup_data_types: List[str] = ["mel_spec"],
+        sup_data_path: str = "",
     ) -> None:
         """Initialize a `MNISTDataModule`.
 
@@ -122,12 +125,12 @@ class SpeechFlowDataModule(LightningDataModule):
                 )
             self.batch_size_per_device = self.hparams.batch_size // self.trainer.world_size
 
-        tokenizer = CharacterTokenizer(symbols)
+        # tokenizer = CharacterTokenizer(symbols)
         # load and split datasets only if not loaded already
         if not self.data_train and not self.data_val and not self.data_test:
-            self.data_train = TTSDataset(tokenizer=tokenizer, manifest_fpaths=self.hparams.train_manifest, sample_rate=self.hparams.sample_rate, min_duration=self.hparams.min_duration, max_duration=self.hparams.max_duration, sup_data_types=["mel_spec"], sup_data_path="/home/tts/ttsteam/repos/bansuri-tts/logs")
-            self.data_val = TTSDataset(tokenizer=tokenizer, manifest_fpaths=self.hparams.val_manifest, sample_rate=self.hparams.sample_rate, min_duration=self.hparams.min_duration, max_duration=self.hparams.max_duration, sup_data_types=["mel_spec"], sup_data_path="/home/tts/ttsteam/repos/bansuri-tts/logs")
-            self.data_test =TTSDataset(tokenizer=tokenizer, manifest_fpaths=self.hparams.test_manifest, sample_rate=self.hparams.sample_rate, min_duration=self.hparams.min_duration, max_duration=self.hparams.max_duration, sup_data_types=["mel_spec"], sup_data_path="/home/tts/ttsteam/repos/bansuri-tts/logs")
+            self.data_train = AudioDataset(manifest_fpaths=self.hparams.train_manifest, sample_rate=self.hparams.sample_rate, min_duration=self.hparams.min_duration, max_duration=self.hparams.max_duration, sup_data_types=self.hparams.sup_data_types, sup_data_path=self.hparams.sup_data_path, n_mels=self.hparams.n_mels, slice_audio=self.hparams.slice_audio)
+            self.data_val = AudioDataset(manifest_fpaths=self.hparams.val_manifest, sample_rate=self.hparams.sample_rate, min_duration=self.hparams.min_duration, max_duration=self.hparams.max_duration, sup_data_types=self.hparams.sup_data_types, sup_data_path=self.hparams.sup_data_path, n_mels=self.hparams.n_mels, slice_audio=self.hparams.slice_audio)
+            self.data_test = AudioDataset(manifest_fpaths=self.hparams.test_manifest, sample_rate=self.hparams.sample_rate, min_duration=self.hparams.min_duration, max_duration=self.hparams.max_duration, sup_data_types=self.hparams.sup_data_types, sup_data_path=self.hparams.sup_data_path, n_mels=self.hparams.n_mels, slice_audio=self.hparams.slice_audio)
 
 
     def train_dataloader(self) -> DataLoader[Any]:

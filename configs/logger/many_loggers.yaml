@@ -2,8 +2,8 @@
 
 defaults:
   # - comet
-  - csv
+  # - csv
   # - mlflow
   # - neptune
-  - tensorboard
+  # - tensorboard
   - wandb
